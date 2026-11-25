@@ -1,0 +1,168 @@
+# Stack do StarLoco para o Portainer (Community ou Business).
+# Não usa build, bind mounts nem arquivos de segredo: tudo vem de imagens
+# no GHCR (geradas por .github/workflows/portainer-images.yml) e de variáveis
+# de ambiente definidas no Portainer. Guia: docs/portainer.md
+#
+# Variáveis obrigatórias: IMAGE_PREFIX, GAME_SERVER_IP, GAME_SERVER_KEY,
+# MARIADB_ROOT_PASSWORD, STARLOCO_DB_PASSWORD, EXCHANGE_KEY
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mariadb:
+    image: ${IMAGE_PREFIX:?defina IMAGE_PREFIX, ex. ghcr.io/usuario/starloco}-db:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?defina MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: starloco_login
+      MARIADB_USER: starloco
+      MARIADB_PASSWORD: ${STARLOCO_DB_PASSWORD:?defina STARLOCO_DB_PASSWORD}
+    command: --bind-address=0.0.0.0
+    # Sem "ports": o banco só é acessível pelos outros serviços da stack.
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *logging
+    command: ["redis-server", "--save", "60", "1000", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  login:
+    image: ${IMAGE_PREFIX}-login:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "450:450"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: "-Xms256m -Xmx512m -Djavax.net.ssl.trustStoreType=JKS -Djavax.net.ssl.keyStoreType=JKS -DmariaDB=true"
+      MARIADB_HOST: mariadb
+      STARLOCO_DB_USER: starloco
+      STARLOCO_DB_PASSWORD: ${STARLOCO_DB_PASSWORD}
+      EXCHANGE_KEY: ${EXCHANGE_KEY:?defina EXCHANGE_KEY (openssl rand -base64 32)}
+      GAME_SERVER_IP: ${GAME_SERVER_IP:?defina GAME_SERVER_IP (IP público da VPS)}
+      GAME_SERVER_ID: ${GAME_SERVER_ID:-601}
+      GAME_SERVER_KEY: ${GAME_SERVER_KEY:?defina GAME_SERVER_KEY}
+      GAME_SERVER_NAME: ${GAME_SERVER_NAME:-StarLoco}
+      GAME_SERVER_VERSION: ${GAME_SERVER_VERSION:-1.39.8}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z 127.0.0.1 450 && nc -z 127.0.0.1 666"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  game:
+    image: ${IMAGE_PREFIX}-game:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "5555:5555"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      login:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx1024m -Djavax.net.ssl.trustStoreType=JKS -Djavax.net.ssl.keyStoreType=JKS -DmariaDB=true"
+      MARIADB_HOST: mariadb
+      STARLOCO_DB_USER: starloco
+      STARLOCO_DB_PASSWORD: ${STARLOCO_DB_PASSWORD}
+      EXCHANGE_KEY: ${EXCHANGE_KEY}
+      GAME_SERVER_IP: ${GAME_SERVER_IP}
+      GAME_SERVER_ID: ${GAME_SERVER_ID:-601}
+      GAME_SERVER_KEY: ${GAME_SERVER_KEY}
+      GAME_SERVER_NAME: ${GAME_SERVER_NAME:-StarLoco}
+      GAME_SERVER_VERSION: ${GAME_SERVER_VERSION:-1.39.8}
+      RATE_XP: ${RATE_XP:-1}
+      RATE_DROP: ${RATE_DROP:-1}
+      RATE_DROP_THRESHOLD: ${RATE_DROP_THRESHOLD:-1}
+      RATE_JOB: ${RATE_JOB:-1}
+      RATE_FM: ${RATE_FM:-1}
+      RATE_HONOR: ${RATE_HONOR:-1}
+      RATE_KAMAS: ${RATE_KAMAS:-1}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5555"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  web:
+    image: ${IMAGE_PREFIX}-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      MARIADB_HOST: mariadb
+      LOGIN_HOST: login
+      GAME_HOST: game
+      STARLOCO_DB_PASSWORD: ${STARLOCO_DB_PASSWORD}
+      # Download do cliente: http://GAME_SERVER_IP[:WEB_PORT]/cliente/CLIENT_DOWNLOAD_TOKEN.zip
+      GAME_SERVER_IP: ${GAME_SERVER_IP}
+      GAME_SERVER_NAME: ${GAME_SERVER_NAME:-StarLoco}
+      WEB_PORT: ${WEB_PORT:-80}
+      CLIENT_DOWNLOAD_TOKEN: ${CLIENT_DOWNLOAD_TOKEN:-}
+    volumes:
+      - web_runtime:/runtime
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health.php"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  zaap:
+    image: ${IMAGE_PREFIX}-zaap:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    logging: *logging
+    # Sem "ports": a API Zaap só é usada dentro da stack.
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mariadb
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: starloco_login
+      MYSQL_USER: starloco
+      MYSQL_PASSWORD: ${STARLOCO_DB_PASSWORD}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  mariadb_data:
+  redis_data:
+  web_runtime:

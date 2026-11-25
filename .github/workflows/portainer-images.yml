@@ -1,0 +1,77 @@
+# Gera as imagens usadas por docker-compose.portainer.yml e publica no GHCR:
+#   ghcr.io/<dono-do-repo>/starloco-{db,login,game,web,zaap}:latest
+# Roda a cada push na branch portainer e também manualmente (aba Actions → Run workflow).
+name: Imagens para o Portainer
+
+on:
+  push:
+    branches: [portainer]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  STARLOCO_LOGIN_REPO: https://github.com/tiboitel/StarLoco-Login.git
+  STARLOCO_LOGIN_REF: v1.0.3
+  STARLOCO_GAME_REPO: https://github.com/StarLoco/StarLoco-Game.git
+  STARLOCO_GAME_REF: v1.0.6
+  ZAAP_REPO: https://github.com/tiboitel/zaap.git
+  ZAAP_REF: d2ba4204e7aee57d463a3b77fe4f98c7807fc835
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: db
+            context: .
+            file: db/Dockerfile
+          - name: login
+            context: login
+            file: login/Dockerfile
+          - name: game
+            context: game
+            file: game/Dockerfile
+          - name: web
+            context: web
+            file: web/Dockerfile.portainer
+          - name: zaap
+            context: zaap
+            file: zaap/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nome da imagem (GHCR exige minúsculas)
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/starloco-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:sha-${{ github.sha }}
+          build-args: |
+            STARLOCO_LOGIN_REPO=${{ env.STARLOCO_LOGIN_REPO }}
+            STARLOCO_LOGIN_REF=${{ env.STARLOCO_LOGIN_REF }}
+            STARLOCO_GAME_REPO=${{ env.STARLOCO_GAME_REPO }}
+            STARLOCO_GAME_REF=${{ env.STARLOCO_GAME_REF }}
+            ZAAP_REPO=${{ env.ZAAP_REPO }}
+            ZAAP_REF=${{ env.ZAAP_REF }}
+          cache-from: type=gha,scope=portainer-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=portainer-${{ matrix.name }}
